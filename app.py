@@ -8,6 +8,7 @@ import hashlib
 import os
 import altair as alt
 import hmac
+import dateparser
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -79,7 +80,9 @@ def parse_xml(xml_content):
     # Datum aus 'titel' extrahieren und in ein Datum-Objekt umwandeln
     # Beispiel: "Montag, 25. November 2024"
     datum_titel_str = titel.strip()
-    datum_titel_obj = datetime.strptime(datum_titel_str.split(',')[1].strip(), '%d. %B %Y')
+    date_part = datum_titel_str.split(',')[1].strip()
+    datum_titel_obj = dateparser.parse(date_part, languages=['de'])
+    # datum_titel_obj = datetime.strptime(datum_titel_str.split(',')[1].strip(), '%d. %B %Y')
 
     # Informationen aus dem <haupt>-Element extrahieren
     haupt = root.find('haupt')
@@ -427,12 +430,6 @@ def main():
     # Daten aus Google Sheets laden
     df = load_from_gsheet()
 
-    # Überprüfung von df
-    #st.write("DataFrame df nach dem Laden aus Google Sheets:")
-    #st.write(df)
-    #st.write(f"Anzahl der Zeilen in df: {len(df)}")
-    #st.write("Datentypen der Spalten in df:")
-    #st.write(df.dtypes)
 
     # Überprüfen, ob der Vortag in den Daten enthalten ist
     heute = datetime.now()
@@ -472,6 +469,8 @@ def main():
             # Speichern in Google Sheets
             save_to_gsheet(final_df)
             st.success('Daten wurden erfolgreich aktualisiert.')
+            min_date = df['Datum'].min().date()
+            max_date = df['Datum'].max().date()
             # Aktualisierte Daten laden
             df = load_from_gsheet()
         else:
