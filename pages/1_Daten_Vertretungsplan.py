@@ -5,39 +5,13 @@ import pandas as pd
 from datetime import datetime, timedelta
 import logging
 import hashlib
-import os
 import altair as alt
-import hmac
 import dateparser
 import gspread
 from google.oauth2.service_account import Credentials
-
-
-def check_password():
-    """Returns `True` if the user had the correct password."""
-
-    def password_entered():
-        """Checks whether a password entered by the user is correct."""
-        if hmac.compare_digest(st.session_state["login"], st.secrets["login"]):
-            st.session_state["password_correct"] = True
-            del st.session_state["login"]  # Don't store the password.
-        else:
-            st.session_state["password_correct"] = False
-
-    # Return True if the password is validated.
-    if st.session_state.get("password_correct", False):
-        return True
-
-    # Show input for password.
-    st.text_input(
-        "Login", type="password", on_change=password_entered, key="login"
-    )
-    if "password_correct" in st.session_state:
-        st.error("😕 Login falsch")
-    return False
-
-
-
+from utils import check_password
+from utils import extract_klassenstufe
+from utils import load_vertretungsplan_data_from_gsheet
 
 
 
@@ -191,35 +165,6 @@ def parse_klasse(klasse_str):
             classes.append(part)
     return classes
 
-# Klassenstufe
-def extract_klassenstufe(klasse_value):
-    if isinstance(klasse_value, str):
-        if 'Klub' in klasse_value:
-            # 'Klub' ignorieren
-            return None
-        elif 'DAZ' in klasse_value:
-            # 'DAZ' ignorieren
-            return None
-        elif 'JG' in klasse_value:
-            # Für Werte wie 'JG12/inf2'
-            parts = klasse_value.split('/')
-            if parts[0].startswith('JG'):
-                klassenstufe = parts[0][2:]  # Extrahiere die Zahl nach 'JG'
-                return klassenstufe
-            else:
-                return None
-        elif '/' in klasse_value:
-            # Für Werte wie '6/4'
-            parts = klasse_value.split('/')
-            if parts[0].isdigit():
-                return parts[0]  # Die Zahl vor dem '/' ist die Klassenstufe
-            else:
-                return None
-        else:
-            # Weitere Fälle behandeln, falls nötig
-            return None
-    else:
-        return None
 
 
 
@@ -239,59 +184,11 @@ def parse_stunde(stunde_str):
             stunden.append(part)
     return stunden
 
-@st.cache_data(ttl=3600)
-def load_from_gsheet():
-    # Google Sheets API initialisieren
-    scope = ['https://www.googleapis.com/auth/spreadsheets']
-    credentials = Credentials.from_service_account_info(
-        st.secrets["connections"]["gsheets"]["credentials"],
-        scopes=scope
-    )
-    gc = gspread.authorize(credentials)
-    sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
-    worksheet = sh.sheet1
 
-    # Daten aus Google Sheets laden
-    data = worksheet.get_all_records()
-    if data:
-        df = pd.DataFrame(data)
-    else:
-        df = pd.DataFrame()
-
-    if not df.empty:
-        # Konvertieren der Spalten in die richtigen Datentypen
-
-        # 'Datum' Spalte in datetime64
-        df['Datum'] = pd.to_datetime(df['Datum'], format='%d.%m.%Y', errors='coerce')
-
-        # 'Stunde' Spalte in int64
-        df['Stunde'] = pd.to_numeric(df['Stunde'], errors='coerce').astype('Int64')
-
-        # 'Ausfall' und 'Selbststudium' in bool, fehlende Werte als False
-        df['Ausfall'] = df['Ausfall'].astype(str).str.lower().map({'true': True, 'false': False})
-        df['Ausfall'] = df['Ausfall'].fillna(False).astype(bool)
-
-        df['Selbststudium'] = df['Selbststudium'].astype(str).str.lower().map({'true': True, 'false': False})
-        df['Selbststudium'] = df['Selbststudium'].fillna(False).astype(bool)
-        
-        # **Erstellen der 'Klassenstufe'-Spalte**
-        df['Klassenstufe'] = df['Klasse'].apply(extract_klassenstufe)
-        df['Klassenstufe'] = pd.to_numeric(df['Klassenstufe'], errors='coerce').astype('Int64')
-
-
-        # Andere Spalten in String
-        other_columns = df.columns.difference(['Datum', 'Stunde', 'Ausfall', 'Selbststudium'])
-        df[other_columns] = df[other_columns].astype(str)
-        df['Ausfall-Fach'] = df['Ausfall-Fach'].replace({'nan': '', 'None': ''}).fillna('')
-
-        # Entfernen von Zeilen mit ungültigen Datumswerten
-        df = df.dropna(subset=['Datum'])
-
-    return df
-
+# helper if the data has to be update if a column is extended etc
 def update_existing_data_in_gsheet():
     # Daten aus Google Sheets laden
-    df = load_from_gsheet()
+    df = load_vertretungsplan_data_from_gsheet()
 
     if not df.empty:
         # Konvertieren der 'Datum'-Spalte in das gewünschte String-Format
@@ -318,7 +215,7 @@ def update_existing_data_in_gsheet():
             scopes=scope
         )
         gc = gspread.authorize(credentials)
-        sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
+        sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["vertretungsplan_data"])
         worksheet = sh.sheet1
 
         # Löschen des vorhandenen Inhalts
@@ -347,11 +244,14 @@ def save_to_gsheet(df):
         scopes=scope
     )
     gc = gspread.authorize(credentials)
-    sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
+    sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["vertretungsplan_data"])
     worksheet = sh.sheet1
 
     # Bestehende Daten laden
-    existing_df = load_from_gsheet()
+    existing_df = load_vertretungsplan_data_from_gsheet()
+
+    # Duplikate entfernen
+    df = df.drop_duplicates(subset=['ID'], keep='first')
 
     if existing_df.empty:
         # Spaltenüberschriften hinzufügen
@@ -424,11 +324,11 @@ def main():
     username = st.secrets["username"]
     password = st.secrets["password"]
 
-    st.title("Daten des Vertretungsplans")
+    st.title("Daten aus dem Vertretungsplans")
     
 
     # Daten aus Google Sheets laden
-    df = load_from_gsheet()
+    df = load_vertretungsplan_data_from_gsheet()
 
 
     # Überprüfen, ob der Vortag in den Daten enthalten ist
@@ -472,13 +372,14 @@ def main():
             min_date = df['Datum'].min().date()
             max_date = df['Datum'].max().date()
             # Aktualisierte Daten laden
-            df = load_from_gsheet()
+            df = load_vertretungsplan_data_from_gsheet()
         else:
             st.info('Keine neuen Daten zum Speichern vorhanden.')
 
     # Anzeige des verfügbaren Datumsbereichs
     if not df.empty:
-
+        # Duplikate entfernen
+        df = df.drop_duplicates(subset=['ID'], keep='first')
         min_date = df['Datum'].min().date()
         max_date = df['Datum'].max().date()
         st.write(f"**Verfügbare Daten von {min_date.strftime('%d.%m.%Y')} bis {max_date.strftime('%d.%m.%Y')}**")
